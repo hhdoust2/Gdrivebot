@@ -35,7 +35,7 @@ function fileNameLabel(name: string): string {
 }
 
 function formatSize(size?: string): string {
-  if (!size) return "";
+  if (!size) return ""; 
   const bytes = Number(size);
   if (!Number.isFinite(bytes)) return "";
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
