@@ -1,0 +1,17 @@
+name = "telegram-drive-bot"
+main = "src/index.ts"
+compatibility_date = "2024-09-25"
+compatibility_flags = ["nodejs_compat"]
+
+# بعد از ساخت دیتابیس با دستور:
+#   wrangler d1 create drive-bot-db
+# مقدار database_id رو از خروجی همون دستور اینجا جایگزین کن.
+[[d1_databases]]
+binding = "DB"
+database_name = "drive-bot-db"
+database_id = "REPLACE_WITH_YOUR_DATABASE_ID"
+
+# متغیر غیرحساس (public). مقادیر حساس (BOT_TOKEN, GOOGLE_CLIENT_SECRET, ENCRYPTION_KEY, BOT_WEBHOOK_SECRET)
+# را با «wrangler secret put» ست کن، نه اینجا.
+[vars]
+BASE_URL = "https://telegram-drive-bot.YOUR-SUBDOMAIN.workers.dev"
