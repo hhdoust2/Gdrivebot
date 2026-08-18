@@ -5,11 +5,12 @@ import {
   deleteUser,
   getOAuthState,
   getUser,
+  setUserFolder,
   upsertUserToken,
 } from "./db";
 import { decrypt, encrypt } from "./crypto";
-import { buildAuthUrl, exchangeCodeForTokens, getAccessToken } from "./oauth";
-import { uploadToDrive } from "./drive";
+import { buildAuthUrl, exchangeCodeForTokens, getAccessToken, revokeToken } from "./oauth";
+import { getOrCreateFolder, uploadToDrive } from "./drive";
 
 export interface Env {
   DB: D1Database;
@@ -19,9 +20,25 @@ export interface Env {
   GOOGLE_CLIENT_SECRET: string;
   BASE_URL: string;
   ENCRYPTION_KEY: string;
+  // اختیاری: فقط اگر سرویس Railway برای فایل‌های بزرگ راه‌اندازی شده باشه لازمه
+  RAILWAY_LARGE_FILE_URL?: string;
+  RAILWAY_SHARED_SECRET?: string;
 }
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // سقف Bot API معمولی تلگرام
+
+/** آیدی پوشه‌ی اختصاصی ربات رو برمی‌گردونه؛ اگه در دیتابیس کش نشده بود، پیدا/می‌سازه و کش می‌کنه. */
+async function ensureFolder(
+  env: Env,
+  telegramId: number,
+  user: { drive_folder_id: string | null },
+  accessToken: string
+): Promise<string> {
+  if (user.drive_folder_id) return user.drive_folder_id;
+  const folderId = await getOrCreateFolder(accessToken);
+  await setUserFolder(env.DB, telegramId, folderId);
+  return folderId;
+}
 
 function createBot(env: Env): Bot {
   const bot = new Bot(env.BOT_TOKEN);
@@ -50,15 +67,33 @@ function createBot(env: Env): Bot {
   bot.command("disconnect", async (ctx) => {
     const telegramId = ctx.from?.id;
     if (!telegramId) return;
+
+    const user = await getUser(env.DB, telegramId);
+    if (!user) {
+      await ctx.reply("شما در حال حاضر متصل نیستید.");
+      return;
+    }
+
+    try {
+      const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
+      await revokeToken(refreshToken);
+    } catch (err) {
+      console.error("revoke error:", err);
+      // حتی اگه revoke سمت گوگل fail بشه، توکن رو از دیتابیس خودمون پاک می‌کنیم تا ربات دیگه ازش استفاده نکنه.
+    }
+
     await deleteUser(env.DB, telegramId);
-    await ctx.reply("اتصال شما به گوگل‌درایو قطع شد. برای اتصال دوباره /start رو بزنید.");
+    await ctx.reply(
+      "✅ اتصال شما به گوگل‌درایو کاملاً قطع و دسترسی اپ لغو شد. برای اتصال دوباره /start رو بزنید."
+    );
   });
 
   bot.command("help", async (ctx) => {
     await ctx.reply(
       "دستورها:\n/start — اتصال به گوگل‌درایو\n/disconnect — قطع اتصال\n\n" +
         "بعد از اتصال، کافیه هر فایلی (سند، عکس، ویدیو یا صدا) بفرستید تا در درایو شما آپلود بشه.\n" +
-        `⚠️ سقف حجم فایل: ${MAX_FILE_BYTES / 1024 / 1024} مگابایت (محدودیت Bot API تلگرام).`
+        `📎 فایل تا ${MAX_FILE_BYTES / 1024 / 1024} مگابایت: مستقیم و سریع.\n` +
+        "📦 فایل بزرگ‌تر: در پس‌زمینه با کمی تأخیر بیشتر آپلود می‌شه (اگه سرویس فایل‌های بزرگ فعال باشه)."
     );
   });
 
@@ -75,43 +110,92 @@ function createBot(env: Env): Bot {
     let fileId: string;
     let fileName: string;
     let mimeType = "application/octet-stream";
+    let fileSize: number | undefined;
 
     const msg = ctx.message;
     if (msg?.document) {
       fileId = msg.document.file_id;
       fileName = msg.document.file_name ?? `file_${Date.now()}`;
       mimeType = msg.document.mime_type ?? mimeType;
+      fileSize = msg.document.file_size;
     } else if (msg?.video) {
       fileId = msg.video.file_id;
       fileName = msg.video.file_name ?? `video_${Date.now()}.mp4`;
       mimeType = msg.video.mime_type ?? "video/mp4";
+      fileSize = msg.video.file_size;
     } else if (msg?.audio) {
       fileId = msg.audio.file_id;
       fileName = msg.audio.file_name ?? `audio_${Date.now()}.mp3`;
       mimeType = msg.audio.mime_type ?? "audio/mpeg";
+      fileSize = msg.audio.file_size;
     } else if (msg?.photo && msg.photo.length > 0) {
       const largest = msg.photo[msg.photo.length - 1];
       fileId = largest.file_id;
       fileName = `photo_${Date.now()}.jpg`;
       mimeType = "image/jpeg";
+      fileSize = largest.file_size;
     } else {
       return;
     }
 
     const statusMsg = await ctx.reply("⏳ در حال آپلود به گوگل‌درایو...");
 
-    try {
-      const file = await ctx.api.getFile(fileId);
-
-      if (file.file_size && file.file_size > MAX_FILE_BYTES) {
+    // فایل‌های بزرگ‌تر از سقف Bot API معمولی: مسیرشون رو به سرویس Railway (اگر تنظیم شده) می‌دیم.
+    // نکته: برای این فایل‌ها اصلاً نباید ctx.api.getFile معمولی صدا زده بشه، چون خودِ تلگرام
+    // برای فایل‌های بالای ۲۰ مگابایت روی Bot API عمومی این تماس رو با خطا رد می‌کنه.
+    if (fileSize && fileSize > MAX_FILE_BYTES) {
+      if (!env.RAILWAY_LARGE_FILE_URL || !env.RAILWAY_SHARED_SECRET) {
         await ctx.api.editMessageText(
           ctx.chat.id,
           statusMsg.message_id,
-          `❌ حجم فایل بیشتر از ${MAX_FILE_BYTES / 1024 / 1024} مگابایته و تلگرام اجازه‌ی دانلودش رو به ربات نمی‌ده.`
+          `❌ حجم فایل بیشتر از ${MAX_FILE_BYTES / 1024 / 1024} مگابایته و سرویس فایل‌های بزرگ هنوز تنظیم نشده.`
         );
         return;
       }
 
+      try {
+        const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
+        const accessToken = await getAccessToken(env, refreshToken);
+        const folderId = await ensureFolder(env, telegramId, user, accessToken);
+
+        const res = await fetch(`${env.RAILWAY_LARGE_FILE_URL}/upload-large`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${env.RAILWAY_SHARED_SECRET}`,
+          },
+          body: JSON.stringify({
+            fileId,
+            botToken: env.BOT_TOKEN,
+            driveAccessToken: accessToken,
+            fileName,
+            mimeType,
+            chatId: ctx.chat.id,
+            statusMessageId: statusMsg.message_id,
+            folderId,
+          }),
+        });
+
+        if (!res.ok) throw new Error(`railway service responded ${res.status}: ${await res.text()}`);
+
+        await ctx.api.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          "📤 فایل بزرگه — در پس‌زمینه آپلود می‌شه، وقتی تموم شد پیام می‌دم."
+        );
+      } catch (err) {
+        console.error("large file handoff error:", err);
+        await ctx.api.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          "❌ ارسال فایل به سرویس آپلود ناموفق بود. دوباره امتحان کنید."
+        );
+      }
+      return;
+    }
+
+    try {
+      const file = await ctx.api.getFile(fileId);
       if (!file.file_path) throw new Error("file_path missing from Telegram response");
 
       const fileUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file.file_path}`;
@@ -121,8 +205,9 @@ function createBot(env: Env): Bot {
 
       const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
       const accessToken = await getAccessToken(env, refreshToken);
+      const folderId = await ensureFolder(env, telegramId, user, accessToken);
 
-      const driveFile = await uploadToDrive(accessToken, fileName, mimeType, fileBytes);
+      const driveFile = await uploadToDrive(accessToken, fileName, mimeType, fileBytes, folderId);
 
       await ctx.api.editMessageText(
         ctx.chat.id,

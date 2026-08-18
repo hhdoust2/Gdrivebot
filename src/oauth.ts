@@ -2,6 +2,7 @@ import type { Env } from "./index";
 
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
 
 // اسکوپ محدود: ربات فقط به فایل‌هایی دسترسی داره که خودش با همین اپ آپلود کرده،
 // نه به کل درایو کاربر. این هم امن‌تره و هم تایید گوگل (verification) ساده‌تری داره.
@@ -62,4 +63,17 @@ export async function getAccessToken(env: Env, refreshToken: string): Promise<st
   }
   const data = await res.json<TokenResponse>();
   return data.access_token;
+}
+
+/** لغو واقعی دسترسیِ اپ در سمت گوگل (نه فقط پاک‌کردن از دیتابیس خودمون). */
+export async function revokeToken(token: string): Promise<void> {
+  const res = await fetch(REVOKE_ENDPOINT, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ token }),
+  });
+  // اگه توکن از قبل نامعتبر/لغوشده بوده، گوگل هم همچنان 200 برمی‌گردونه؛ فقط خطاهای واقعی رو throw کن.
+  if (!res.ok) {
+    throw new Error(`revoke failed (${res.status}): ${await res.text()}`);
+  }
 }

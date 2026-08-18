@@ -2,6 +2,7 @@ export interface UserRow {
   telegram_id: number;
   encrypted_refresh_token: string;
   iv: string;
+  drive_folder_id: string | null;
 }
 
 export interface OAuthStateRow {
@@ -11,10 +12,17 @@ export interface OAuthStateRow {
 
 export async function getUser(db: D1Database, telegramId: number): Promise<UserRow | null> {
   const row = await db
-    .prepare("SELECT telegram_id, encrypted_refresh_token, iv FROM users WHERE telegram_id = ?")
+    .prepare("SELECT telegram_id, encrypted_refresh_token, iv, drive_folder_id FROM users WHERE telegram_id = ?")
     .bind(telegramId)
     .first<UserRow>();
   return row ?? null;
+}
+
+export async function setUserFolder(db: D1Database, telegramId: number, folderId: string): Promise<void> {
+  await db
+    .prepare("UPDATE users SET drive_folder_id = ?, updated_at = datetime('now') WHERE telegram_id = ?")
+    .bind(folderId, telegramId)
+    .run();
 }
 
 export async function upsertUserToken(
