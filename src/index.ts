@@ -451,7 +451,7 @@ async function handleOAuthCallback(req: Request, env: Env): Promise<Response> {
   if (!tokens.refresh_token) {
     return htmlResponse(
       "خطا در دریافت مجوز",
-      "توکن دریافت نشد. اگر قبلاً یک‌بار به این اپلیکیشن دسترسی داده‌اید، از تنظیمات حساب گوگل (Google Account → Security → Third-party access) دسترسی قبلی رو لغو کنید و دوباره از تلگرام تلاش کنید."
+      "توکن refresh دریافت نشد. اگر قبلاً این اپلیکیشن را مجاز کرده‌اید، لطفاً در تنظیمات حساب گوگل دسترسی قبلی را حذف کرده و دوباره تلاش کنید."
     );
   }
 
