@@ -26,8 +26,9 @@ const MAX_SEND_BYTES = 50 * 1024 * 1024;
 function mainMenuKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("📤 آپلود فایل", "upload_hint")
+    .text("📋 لیست", "list:0")
     .row()
-    .text("📋 لیست فایل‌ها", "list:0");
+    .text("🔓 قطع اتصال", "disconnect");
 }
 
 function fileNameLabel(name: string): string {
@@ -69,6 +70,27 @@ export interface Env {
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // سقف Bot API معمولی تلگرام
 
+// Rate limiting ساده: هر user حداکثر ۱۰ تا بر ثانیه درخواست
+const rateLimitMap = new Map<number, number[]>();
+
+function isRateLimited(telegramId: number): boolean {
+  const now = Date.now();
+  const limit = 10; // درخواست‌های مجاز در پنجره‌ی زمانی
+  const window = 1000; // یک ثانیه
+
+  let timestamps = rateLimitMap.get(telegramId) || [];
+  timestamps = timestamps.filter((t) => now - t < window);
+
+  if (timestamps.length >= limit) {
+    console.warn(`Rate limit exceeded for user ${telegramId}`);
+    return true;
+  }
+
+  timestamps.push(now);
+  rateLimitMap.set(telegramId, timestamps);
+  return false;
+}
+
 /** آیدی پوشه‌ی اختصاصی ربات رو برمی‌گردونه؛ اگه در دیتابیس کش نشده بود، پیدا/می‌سازه و کش می‌کنه. */
 async function ensureFolder(
   env: Env,
@@ -84,6 +106,17 @@ async function ensureFolder(
 
 function createBot(env: Env): Bot {
   const bot = new Bot(env.BOT_TOKEN);
+
+  // Rate limiting middleware
+  bot.use(async (ctx, next) => {
+    const telegramId = ctx.from?.id;
+    if (telegramId && isRateLimited(telegramId)) {
+      console.warn(`Rate limited request from ${telegramId}`);
+      // فقط خاموش می‌کنیم، جواب ندادن بهتره تا spam filter‌ها فکر نکنند مجوز داریم
+      return;
+    }
+    await next();
+  });
 
   bot.command("start", async (ctx) => {
     const telegramId = ctx.from?.id;
@@ -282,6 +315,26 @@ function createBot(env: Env): Bot {
     });
   });
 
+  bot.callbackQuery("disconnect", async (ctx) => {
+    const telegramId = ctx.from.id;
+    await ctx.answerCallbackQuery();
+
+    try {
+      const user = await getUser(env.DB, telegramId);
+      if (user) {
+        const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
+        await revokeToken(env, refreshToken);
+      }
+      await deleteUser(env.DB, telegramId);
+      await ctx.editMessageText("✅ اتصال با گوگل‌درایو قطع شد. برای دوباره اتصال /start رو بزن.", {
+        reply_markup: new InlineKeyboard(),
+      });
+    } catch (err) {
+      console.error("disconnect error:", err);
+      await ctx.editMessageText("❌ خطا در قطع اتصال. دوباره امتحان کن.");
+    }
+  });
+
   // ── لیست فایل‌ها ────────────────────────────────────────────
   bot.callbackQuery(/^list:(.*)$/, async (ctx) => {
     const telegramId = ctx.from.id;
@@ -359,7 +412,10 @@ function createBot(env: Env): Bot {
     await ctx.answerCallbackQuery({ text: "در حال آماده‌سازی دانلود..." });
 
     const user = await getUser(env.DB, telegramId);
-    if (!user || !ctx.chat) return;
+    if (!user || !ctx.chat) {
+      await ctx.reply("❌ مجوز ندارم. لطفاً دوباره /start رو بزن.");
+      return;
+    }
 
     try {
       const { accessToken } = await prepareDriveAccess(env, telegramId, user);
@@ -367,8 +423,12 @@ function createBot(env: Env): Bot {
       const sizeBytes = meta.size ? Number(meta.size) : 0;
 
       if (sizeBytes > MAX_SEND_BYTES) {
-        await ctx.reply(
-          `📦 این فایل بزرگ‌تر از ${MAX_SEND_BYTES / 1024 / 1024} مگابایته و نمی‌تونم مستقیم بفرستمش.\n🔗 لینک مشاهده/دانلود: ${meta.webViewLink}`
+        const linkText = meta.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
+        await ctx.editMessageText(
+          `📦 این فایل بزرگ‌تر از ${MAX_SEND_BYTES / 1024 / 1024} مگابایته.\n\n🔗 برای دانلود از لینک زیر استفاده کن:\n${linkText}`,
+          {
+            reply_markup: new InlineKeyboard().text("🔙 بازگشت", `file:${fileId}`),
+          }
         );
         return;
       }
@@ -377,7 +437,9 @@ function createBot(env: Env): Bot {
       await ctx.replyWithDocument(new InputFile(new Uint8Array(bytes), meta.name));
     } catch (err) {
       console.error("download error:", err);
-      await ctx.reply("❌ دانلود ناموفق بود. دوباره امتحان کن.");
+      await ctx.editMessageText("❌ دانلود ناموفق بود. دوباره امتحان کن.", {
+        reply_markup: new InlineKeyboard().text("🔙 بازگشت", `file:${fileId}`),
+      });
     }
   });
 
@@ -428,11 +490,19 @@ async function handleOAuthCallback(req: Request, env: Env): Promise<Response> {
   const error = url.searchParams.get("error");
 
   if (error) {
+    console.warn(`OAuth error from Google: ${error}`);
     return htmlResponse("اتصال لغو شد", "می‌تونید به تلگرام برگردید و دوباره از /start تلاش کنید.");
   }
 
   if (!code || !state) {
+    console.warn("Missing code or state in OAuth callback");
     return new Response("Missing code/state", { status: 400 });
+  }
+
+  // اعتبارسنجی فرمت state (باید UUID باشه)
+  if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(state)) {
+    console.warn(`Invalid state format: ${state}`);
+    return htmlResponse("خطا", "State نامعتبره.");
   }
 
   const oauthState = await getOAuthState(env.DB, state);

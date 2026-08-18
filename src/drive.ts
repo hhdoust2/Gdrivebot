@@ -98,9 +98,9 @@ export async function listFilesInFolder(
   folderId: string,
   pageToken?: string
 ): Promise<{ files: DriveFileMeta[]; nextPageToken?: string }> {
-  const query = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
+  const query = `'${folderId}' in parents and trashed=false`;
   const params = new URLSearchParams({
-    q: decodeURIComponent(query),
+    q: query,
     fields: "nextPageToken,files(id,name,mimeType,size,webViewLink)",
     orderBy: "createdTime desc",
     pageSize: "20",
@@ -111,7 +111,10 @@ export async function listFilesInFolder(
   const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
-  if (!res.ok) throw new Error(`drive list failed (${res.status}): ${await res.text()}`);
+  if (!res.ok) {
+    console.error(`drive list failed (${res.status}): ${await res.text()}`);
+    throw new Error(`drive list failed (${res.status})`);
+  }
   const data = await res.json<{ files: DriveFileMeta[]; nextPageToken?: string }>();
   return { files: data.files ?? [], nextPageToken: data.nextPageToken };
 }
