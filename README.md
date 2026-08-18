@@ -114,6 +114,14 @@ curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
 
 ---
 
+## پشتیبانی از فایل‌های بالای ۲۰ مگابایت (اختیاری)
+
+سقف ۲۰ مگابایت محدودیتِ خودِ Bot API عمومی تلگرامه. برای عبور از این سقف (تا ۲ گیگابایت)، یک سرویس
+کمکی روی Railway اضافه شده که در پوشه‌ی `railway-large-file-service/` قرار داره و راهنمای کامل
+راه‌اندازی و اتصالش به این Worker در `railway-large-file-service/README.md` توضیح داده شده. تا وقتی
+`RAILWAY_LARGE_FILE_URL` و `RAILWAY_SHARED_SECRET` ست نشده باشن، ربات فقط همون فایل‌های زیر ۲۰ مگابایت
+رو پردازش می‌کنه (بدون خطا).
+
 ## دیپلوی روی GitHub (اتصال خودکار)
 
 می‌تونید ریپو رو به GitHub پوش کنید و از Cloudflare Dashboard → Workers & Pages → Create →
