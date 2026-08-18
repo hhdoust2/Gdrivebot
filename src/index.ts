@@ -323,7 +323,7 @@ function createBot(env: Env): Bot {
       const user = await getUser(env.DB, telegramId);
       if (user) {
         const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
-        await revokeToken(env, refreshToken);
+        await revokeToken(refreshToken);
       }
       await deleteUser(env.DB, telegramId);
       await ctx.editMessageText("✅ اتصال با گوگل‌درایو قطع شد. برای دوباره اتصال /start رو بزن.", {
