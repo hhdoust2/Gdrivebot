@@ -9,9 +9,9 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "drive-bot-db"
-database_id = "REPLACE_WITH_YOUR_DATABASE_ID"
+database_id = "d76be828-7491-4135-a4d5-3a53e8cde8b3"
 
 # متغیر غیرحساس (public). مقادیر حساس (BOT_TOKEN, GOOGLE_CLIENT_SECRET, ENCRYPTION_KEY, BOT_WEBHOOK_SECRET)
 # را با «wrangler secret put» ست کن، نه اینجا.
 [vars]
-BASE_URL = "https://telegram-drive-bot.YOUR-SUBDOMAIN.workers.dev"
+BASE_URL = "https://telegram-drive-bot.https://gdrivebot.aialsabela.workers.dev"
