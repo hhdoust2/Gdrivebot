@@ -26,7 +26,8 @@ const MAX_SEND_BYTES = 50 * 1024 * 1024;
 function mainMenuKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("📤 آپلود فایل", "upload_hint")
-    .text("📋 لیست", "list:0")
+    .row()
+    .text("📋 لیست فایل‌ها", "list:0")
     .row()
     .text("🔓 قطع اتصال", "disconnect");
 }
@@ -411,6 +412,7 @@ function createBot(env: Env): Bot {
 
       const kb = new InlineKeyboard()
         .text("⬇️ دانلود", `dl:${fileId}`)
+        .row()
         .text("🗑 حذف", `del:${fileId}`)
         .row()
         .text("🔙 بازگشت به لیست", "list:0");
