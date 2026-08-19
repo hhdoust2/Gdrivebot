@@ -160,8 +160,8 @@ function createBot(env: Env): Bot {
 
     const state = crypto.randomUUID();
     await createOAuthState(env.DB, state, telegramId);
-    const url = buildAuthUrl(env, state);
-    const keyboard = new InlineKeyboard().url("🔗 اتصال به گوگل‌درایو", url);
+    const connectUrl = `${env.BASE_URL.replace(/\/+$/, "")}/connect?state=${state}`;
+    const keyboard = new InlineKeyboard().url("🔗 اتصال به گوگل‌درایو", connectUrl);
 
     await ctx.reply(
       "سلام! برای شروع، اول باید حساب گوگل‌درایوت رو وصل کنی:",
@@ -610,9 +610,61 @@ function htmlResponse(title: string, body: string): Response {
   return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
+async function handleConnectPage(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url);
+  const state = url.searchParams.get("state");
+
+  if (!state || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(state)) {
+    return htmlResponse("لینک نامعتبر", "این لینک معتبر نیست. لطفاً از تلگرام دوباره /start را بزنید.");
+  }
+
+  const oauthState = await getOAuthState(env.DB, state);
+  if (!oauthState) {
+    return htmlResponse("لینک منقضی شده", "لطفاً از تلگرام دوباره روی دکمه‌ی اتصال بزنید.");
+  }
+  const stateAgeMs = Date.now() - new Date(oauthState.created_at + "Z").getTime();
+  if (stateAgeMs > 10 * 60 * 1000) {
+    await deleteOAuthState(env.DB, state);
+    return htmlResponse("لینک منقضی شده", "این لینک قدیمیه. لطفاً از تلگرام دوباره روی دکمه‌ی اتصال بزنید.");
+  }
+
+  const googleUrl = buildAuthUrl(env, state);
+  const html = `<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>اتصال به گوگل‌درایو</title>
+  <style>
+    body { font-family: system-ui, sans-serif; text-align: center; padding: 48px 20px;
+           background: #0f172a; color: #e2e8f0; max-width: 480px; margin: 0 auto; }
+    h1 { color: #e2e8f0; font-size: 1.3rem; }
+    p { color: #94a3b8; line-height: 1.8; }
+    ul { text-align: right; color: #94a3b8; line-height: 1.9; }
+    a.btn { display: inline-block; margin-top: 24px; padding: 14px 28px; background: #22c55e;
+            color: #0f172a; font-weight: bold; text-decoration: none; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>🔗 اتصال ربات به حساب گوگل‌درایو شما</h1>
+  <p>با کلیک روی دکمه‌ی زیر به صفحه‌ی ورود رسمی گوگل (accounts.google.com) منتقل می‌شوید.</p>
+  <ul>
+    <li>ربات فقط به پوشه‌ای که خودش در درایو شما می‌سازد دسترسی دارد، نه کل درایو شما.</li>
+    <li>می‌توانید هر زمان از منوی ربات (دکمه‌ی «قطع اتصال») دسترسی را لغو کنید.</li>
+  </ul>
+  <a class="btn" href="${googleUrl}">ادامه به صفحه‌ی ورود گوگل ←</a>
+</body>
+</html>`;
+  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
+
+    if (url.pathname === "/connect") {
+      return handleConnectPage(req, env);
+    }
 
     if (url.pathname === "/oauth/callback") {
       return handleOAuthCallback(req, env);
