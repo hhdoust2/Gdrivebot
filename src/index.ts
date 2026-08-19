@@ -78,6 +78,10 @@ function isRateLimited(telegramId: number): boolean {
   const limit = 10; // درخواست‌های مجاز در پنجره‌ی زمانی
   const window = 1000; // یک ثانیه
 
+  // جلوگیری از نشت حافظه: اگه map خیلی بزرگ شد (خیلی کاربر متفاوت)، پاکش کن.
+  // چون Workerها short-lived هستن این به‌ندرت لازم می‌شه، ولی به‌عنوان محافظ خوبه.
+  if (rateLimitMap.size > 5000) rateLimitMap.clear();
+
   let timestamps = rateLimitMap.get(telegramId) || [];
   timestamps = timestamps.filter((t) => now - t < window);
 
@@ -106,6 +110,15 @@ async function ensureFolder(
 
 function createBot(env: Env): Bot {
   const bot = new Bot(env.BOT_TOKEN);
+
+  // Safety net سراسری: اگه هر handler ای throw کنه، اینجا گرفته می‌شه
+  // و دیگه exception به بیرون (به webhookCallback) نشت نمی‌کنه.
+  // این جلوی چیزی رو می‌گیره که باعث می‌شد Telegram فکر کنه delivery
+  // fail شده و همون update رو بارها retry کنه (که خودش می‌تونست
+  // باعث فعال‌شدن فیلتر آنتی‌اسپم بشه).
+  bot.catch((err) => {
+    console.error("Unhandled bot error:", err.error, "| update:", JSON.stringify(err.ctx.update));
+  });
 
   // Rate limiting middleware
   bot.use(async (ctx, next) => {
@@ -510,6 +523,13 @@ async function handleOAuthCallback(req: Request, env: Env): Promise<Response> {
     return htmlResponse("لینک منقضی شده", "لطفاً از تلگرام دوباره روی دکمه‌ی اتصال بزنید.");
   }
 
+  // امنیت: state بیشتر از ۱۰ دقیقه قبل ساخته شده باشه، دیگه معتبر نیست
+  const stateAgeMs = Date.now() - new Date(oauthState.created_at + "Z").getTime();
+  if (stateAgeMs > 10 * 60 * 1000) {
+    await deleteOAuthState(env.DB, state);
+    return htmlResponse("لینک منقضی شده", "این لینک قدیمیه. لطفاً از تلگرام دوباره روی دکمه‌ی اتصال بزنید.");
+  }
+
   let tokens;
   try {
     tokens = await exchangeCodeForTokens(env, code);
@@ -578,7 +598,17 @@ export default {
       const handleUpdate = webhookCallback(bot, "cloudflare-mod", {
         secretToken: env.BOT_WEBHOOK_SECRET,
       });
-      return handleUpdate(req);
+      try {
+        return await handleUpdate(req);
+      } catch (err) {
+        // هر خطای غیرمنتظره‌ای اینجا گیر بیفته، باز هم 200 برمی‌گردونیم.
+        // اگه Telegram جواب غیر ۲۰۰ ببینه، همون update رو بارها دوباره
+        // می‌فرسته که می‌تونه سیل درخواست/پیام بسازه و ربات رو در معرض
+        // فیلتر آنتی‌اسپم تلگرام قرار بده. جواب ۲۰۰ یعنی «دریافت شد»
+        // حتی اگه پردازشش داخلی fail شده باشه (که خودش لاگ می‌شه).
+        console.error("Webhook top-level error:", err);
+        return new Response("ok", { status: 200 });
+      }
     }
 
     if (url.pathname === "/") {
