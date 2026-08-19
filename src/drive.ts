@@ -3,14 +3,6 @@ export interface DriveFile {
   webViewLink: string;
 }
 
-export interface DriveFileMeta {
-  id: string;
-  name: string;
-  mimeType: string;
-  size?: string;
-  webViewLink?: string;
-}
-
 const FOLDER_NAME = "Telegram Bot Uploads";
 
 /**
@@ -90,61 +82,4 @@ export async function uploadToDrive(
   }
 
   return res.json();
-}
-
-/** لیست فایل‌های داخل پوشه‌ی اختصاصی ربات (بدون زیرپوشه‌ها، جدیدترین‌ها اول). */
-export async function listFilesInFolder(
-  accessToken: string,
-  folderId: string,
-  pageToken?: string
-): Promise<{ files: DriveFileMeta[]; nextPageToken?: string }> {
-  const query = `'${folderId}' in parents and trashed=false`;
-  const params = new URLSearchParams({
-    q: query,
-    fields: "nextPageToken,files(id,name,mimeType,size,webViewLink)",
-    orderBy: "createdTime desc",
-    pageSize: "20",
-    spaces: "drive",
-  });
-  if (pageToken) params.set("pageToken", pageToken);
-
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok) {
-    console.error(`drive list failed (${res.status}): ${await res.text()}`);
-    throw new Error(`drive list failed (${res.status})`);
-  }
-  const data = await res.json<{ files: DriveFileMeta[]; nextPageToken?: string }>();
-  return { files: data.files ?? [], nextPageToken: data.nextPageToken };
-}
-
-/** متادیتای یک فایل (برای نمایش قبل از دانلود/حذف). */
-export async function getFileMeta(accessToken: string, fileId: string): Promise<DriveFileMeta> {
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,webViewLink`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  if (!res.ok) throw new Error(`drive get meta failed (${res.status}): ${await res.text()}`);
-  return res.json();
-}
-
-/** دانلود بایت‌های فایل از درایو. */
-export async function downloadFileBytes(accessToken: string, fileId: string): Promise<ArrayBuffer> {
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok) throw new Error(`drive download failed (${res.status}): ${await res.text()}`);
-  return res.arrayBuffer();
-}
-
-/** حذف فایل از درایو (چون scope ما drive.file هست، فقط فایل‌های ساخته‌شده توسط همین اپ قابل حذفن). */
-export async function deleteFile(accessToken: string, fileId: string): Promise<void> {
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok && res.status !== 404) {
-    throw new Error(`drive delete failed (${res.status}): ${await res.text()}`);
-  }
 }

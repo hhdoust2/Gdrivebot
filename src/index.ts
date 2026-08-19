@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard, InputFile, webhookCallback } from "grammy";
+import { Bot, InlineKeyboard, webhookCallback } from "grammy";
 import {
   createOAuthState,
   deleteOAuthState,
@@ -7,21 +7,10 @@ import {
   getUser,
   setUserFolder,
   upsertUserToken,
-  UserRow,
 } from "./db";
 import { decrypt, encrypt } from "./crypto";
 import { buildAuthUrl, exchangeCodeForTokens, getAccessToken, revokeToken } from "./oauth";
-import {
-  deleteFile,
-  downloadFileBytes,
-  getFileMeta,
-  getOrCreateFolder,
-  listFilesInFolder,
-  uploadToDrive,
-} from "./drive";
-
-// سقفی که برای «ارسال» فایل توسط ربات به کاربر در تلگرام امن حساب می‌شه.
-const MAX_SEND_BYTES = 50 * 1024 * 1024;
+import { getOrCreateFolder, uploadToDrive } from "./drive";
 
 /**
  * دکمه‌های کوتاه (مثل «🔙 بازگشت») رو با فاصله‌ی نامرئی (non-breaking space) پد می‌کنه
@@ -38,36 +27,7 @@ function pad(label: string, targetLen = 18): string {
 }
 
 function mainMenuKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text(pad("📤 آپلود فایل"), "upload_hint")
-    .row()
-    .text(pad("📋 لیست فایل‌ها"), "list:0")
-    .row()
-    .text(pad("🔓 قطع اتصال"), "disconnect");
-}
-
-function fileNameLabel(name: string): string {
-  return name.length > 28 ? name.slice(0, 27) + "…" : name;
-}
-
-function formatSize(size?: string): string {
-  if (!size) return ""; 
-  const bytes = Number(size);
-  if (!Number.isFinite(bytes)) return "";
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** توکن دسترسیِ درایو + آیدی پوشه رو برای یک کاربر آماده می‌کنه (برای استفاده در callback handlerها). */
-async function prepareDriveAccess(
-  env: Env,
-  telegramId: number,
-  user: UserRow
-): Promise<{ accessToken: string; folderId: string }> {
-  const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
-  const accessToken = await getAccessToken(env, refreshToken);
-  const folderId = await ensureFolder(env, telegramId, user, accessToken);
-  return { accessToken, folderId };
+  return new InlineKeyboard().text(pad("🔓 قطع اتصال"), "disconnect");
 }
 
 export interface Env {
@@ -152,7 +112,7 @@ function createBot(env: Env): Bot {
 
     const user = await getUser(env.DB, telegramId);
     if (user) {
-      await ctx.reply("✅ شما از قبل به گوگل‌درایو متصل هستید. از منوی زیر استفاده کنید:", {
+      await ctx.reply("✅ شما از قبل به گوگل‌درایو متصل هستید. کافیه یه فایل بفرستید تا در درایوتون ذخیره بشه.", {
         reply_markup: mainMenuKeyboard(),
       });
       return;
@@ -336,13 +296,6 @@ function createBot(env: Env): Bot {
     await ctx.editMessageText("منوی اصلی:", { reply_markup: mainMenuKeyboard() });
   });
 
-  bot.callbackQuery("upload_hint", async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await ctx.editMessageText("📤 کافیه یه فایل (سند، عکس، ویدیو یا صدا) همین‌جا برام بفرستی.", {
-      reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), "menu"),
-    });
-  });
-
   bot.callbackQuery("disconnect", async (ctx) => {
     const telegramId = ctx.from.id;
     await ctx.answerCallbackQuery();
@@ -368,154 +321,6 @@ function createBot(env: Env): Bot {
     await ctx.editMessageText("✅ اتصال با گوگل‌درایو قطع شد. برای دوباره اتصال /start رو بزن.", {
       reply_markup: new InlineKeyboard(),
     });
-  });
-
-  // ── لیست فایل‌ها ────────────────────────────────────────────
-  bot.callbackQuery(/^list:(.*)$/, async (ctx) => {
-    const telegramId = ctx.from.id;
-    // "0" یعنی صفحه‌ی اول (از دکمه‌ی منوی اصلی)، نه یه pageToken واقعی گوگل.
-    const raw = ctx.match[1];
-    const pageToken = raw && raw !== "0" ? raw : undefined;
-    await ctx.answerCallbackQuery();
-
-    const user = await getUser(env.DB, telegramId);
-    if (!user) {
-      await ctx.editMessageText("قبلش باید با /start حساب گوگل‌درایوت رو وصل کنی.");
-      return;
-    }
-
-    try {
-      const { accessToken, folderId } = await prepareDriveAccess(env, telegramId, user);
-      const { files, nextPageToken } = await listFilesInFolder(accessToken, folderId, pageToken);
-
-      if (files.length === 0 && !pageToken) {
-        await ctx.editMessageText("📭 هنوز فایلی در پوشه‌ی درایوت نیست.", {
-          reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), "menu"),
-        });
-        return;
-      }
-
-      const kb = new InlineKeyboard();
-      for (const f of files) {
-        kb.text(pad(`📄 ${fileNameLabel(f.name)}`), `file:${f.id}`).row();
-      }
-      if (nextPageToken) kb.text(pad("➡️ صفحه‌ی بعد"), `list:${nextPageToken}`).row();
-      kb.text(pad("🔙 بازگشت"), "menu");
-
-      await ctx.editMessageText("📋 فایل‌های تو در درایو:", { reply_markup: kb });
-    } catch (err) {
-      console.error("list error:", err);
-      await ctx.editMessageText("❌ خطا در دریافت لیست فایل‌ها. دوباره امتحان کن.", {
-        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), "menu"),
-      });
-    }
-  });
-
-  // ── جزئیات یک فایل ─────────────────────────────────────────
-  bot.callbackQuery(/^file:(.+)$/, async (ctx) => {
-    const telegramId = ctx.from.id;
-    const fileId = ctx.match[1];
-    await ctx.answerCallbackQuery();
-
-    const user = await getUser(env.DB, telegramId);
-    if (!user) return;
-
-    try {
-      const { accessToken } = await prepareDriveAccess(env, telegramId, user);
-      const meta = await getFileMeta(accessToken, fileId);
-
-      const kb = new InlineKeyboard()
-        .text(pad("⬇️ دانلود"), `dl:${fileId}`)
-        .row()
-        .text(pad("🗑 حذف"), `del:${fileId}`)
-        .row()
-        .text(pad("🔙 بازگشت به لیست"), "list:0");
-
-      await ctx.editMessageText(
-        `📄 ${meta.name}\n${formatSize(meta.size) ? `حجم: ${formatSize(meta.size)}` : ""}`,
-        { reply_markup: kb }
-      );
-    } catch (err) {
-      console.error("file detail error:", err);
-      await ctx.editMessageText("❌ خطا در دریافت اطلاعات فایل.", {
-        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), "list:0"),
-      });
-    }
-  });
-
-  // ── دانلود فایل ────────────────────────────────────────────
-  bot.callbackQuery(/^dl:(.+)$/, async (ctx) => {
-    const telegramId = ctx.from.id;
-    const fileId = ctx.match[1];
-    await ctx.answerCallbackQuery({ text: "در حال آماده‌سازی دانلود..." });
-
-    const user = await getUser(env.DB, telegramId);
-    if (!user || !ctx.chat) {
-      await ctx.reply("❌ مجوز ندارم. لطفاً دوباره /start رو بزن.");
-      return;
-    }
-
-    try {
-      const { accessToken } = await prepareDriveAccess(env, telegramId, user);
-      const meta = await getFileMeta(accessToken, fileId);
-      const sizeBytes = meta.size ? Number(meta.size) : 0;
-
-      if (sizeBytes > MAX_SEND_BYTES) {
-        const linkText = meta.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
-        await ctx.editMessageText(
-          `📦 این فایل بزرگ‌تر از ${MAX_SEND_BYTES / 1024 / 1024} مگابایته.\n\n🔗 برای دانلود از لینک زیر استفاده کن:\n${linkText}`,
-          {
-            reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), `file:${fileId}`),
-          }
-        );
-        return;
-      }
-
-      const bytes = await downloadFileBytes(accessToken, fileId);
-      await ctx.replyWithDocument(new InputFile(new Uint8Array(bytes), meta.name));
-    } catch (err) {
-      console.error("download error:", err);
-      await ctx.editMessageText("❌ دانلود ناموفق بود. دوباره امتحان کن.", {
-        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), `file:${fileId}`),
-      });
-    }
-  });
-
-  // ── حذف فایل (با تأیید) ────────────────────────────────────
-  bot.callbackQuery(/^del:(.+)$/, async (ctx) => {
-    const fileId = ctx.match[1];
-    await ctx.answerCallbackQuery();
-
-    const kb = new InlineKeyboard()
-      .text(pad("✅ بله، حذف کن"), `delok:${fileId}`)
-      .row()
-      .text(pad("🔙 انصراف"), `file:${fileId}`);
-
-    await ctx.editMessageText("❗️ مطمئنی می‌خوای این فایل رو برای همیشه حذف کنی؟", {
-      reply_markup: kb,
-    });
-  });
-
-  bot.callbackQuery(/^delok:(.+)$/, async (ctx) => {
-    const telegramId = ctx.from.id;
-    const fileId = ctx.match[1];
-    await ctx.answerCallbackQuery();
-
-    const user = await getUser(env.DB, telegramId);
-    if (!user) return;
-
-    try {
-      const { accessToken } = await prepareDriveAccess(env, telegramId, user);
-      await deleteFile(accessToken, fileId);
-      await ctx.editMessageText("🗑 فایل حذف شد.", {
-        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت به لیست"), "list:0"),
-      });
-    } catch (err) {
-      console.error("delete error:", err);
-      await ctx.editMessageText("❌ حذف ناموفق بود. دوباره امتحان کن.", {
-        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), `file:${fileId}`),
-      });
-    }
   });
 
   return bot;
@@ -580,7 +385,7 @@ async function handleOAuthCallback(req: Request, env: Env): Promise<Response> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       chat_id: oauthState.telegram_id,
-      text: "✅ اتصال به گوگل‌درایو با موفقیت انجام شد! از منوی زیر استفاده کنید یا مستقیم یه فایل بفرستید.",
+      text: "✅ اتصال به گوگل‌درایو با موفقیت انجام شد! از الان هر فایلی که همین‌جا بفرستید، خودکار در پوشه‌ی اختصاصی‌تون در درایو ذخیره می‌شه.",
       reply_markup: mainMenuKeyboard(),
     }),
   });
@@ -628,7 +433,8 @@ async function handleConnectPage(req: Request, env: Env): Promise<Response> {
     return htmlResponse("لینک منقضی شده", "این لینک قدیمیه. لطفاً از تلگرام دوباره روی دکمه‌ی اتصال بزنید.");
   }
 
-  const googleUrl = buildAuthUrl(env, state);
+  // نکته: عمداً آدرس accounts.google.com رو مستقیم در HTML نمی‌ذاریم؛ دکمه به یه
+  // مسیر داخلی خودمون اشاره می‌کنه که با ریدایرکت سمت سرور (۳۰۲) کاربر رو به گوگل می‌فرسته.
   const html = `<!doctype html>
 <html lang="fa" dir="rtl">
 <head>
@@ -647,15 +453,30 @@ async function handleConnectPage(req: Request, env: Env): Promise<Response> {
 </head>
 <body>
   <h1>🔗 اتصال ربات به حساب گوگل‌درایو شما</h1>
-  <p>با کلیک روی دکمه‌ی زیر به صفحه‌ی ورود رسمی گوگل (accounts.google.com) منتقل می‌شوید.</p>
+  <p>با کلیک روی دکمه‌ی زیر به صفحه‌ی ورود رسمی گوگل منتقل می‌شوید.</p>
   <ul>
     <li>ربات فقط به پوشه‌ای که خودش در درایو شما می‌سازد دسترسی دارد، نه کل درایو شما.</li>
     <li>می‌توانید هر زمان از منوی ربات (دکمه‌ی «قطع اتصال») دسترسی را لغو کنید.</li>
   </ul>
-  <a class="btn" href="${googleUrl}">ادامه به صفحه‌ی ورود گوگل ←</a>
+  <a class="btn" href="/go?state=${state}">ادامه به صفحه‌ی ورود ←</a>
 </body>
 </html>`;
   return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
+/** ریدایرکت سمت سرور (نه لینک مستقیم در HTML) به‌سمت صفحه‌ی OAuth گوگل. */
+async function handleGoRedirect(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url);
+  const state = url.searchParams.get("state");
+  if (!state || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(state)) {
+    return htmlResponse("لینک نامعتبر", "لطفاً از تلگرام دوباره /start را بزنید.");
+  }
+  const oauthState = await getOAuthState(env.DB, state);
+  if (!oauthState) {
+    return htmlResponse("لینک منقضی شده", "لطفاً از تلگرام دوباره روی دکمه‌ی اتصال بزنید.");
+  }
+  const googleUrl = buildAuthUrl(env, state);
+  return Response.redirect(googleUrl, 302);
 }
 
 export default {
@@ -664,6 +485,10 @@ export default {
 
     if (url.pathname === "/connect") {
       return handleConnectPage(req, env);
+    }
+
+    if (url.pathname === "/go") {
+      return handleGoRedirect(req, env);
     }
 
     if (url.pathname === "/oauth/callback") {
