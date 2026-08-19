@@ -332,26 +332,35 @@ function createBot(env: Env): Bot {
     const telegramId = ctx.from.id;
     await ctx.answerCallbackQuery();
 
+    // مهم: حتی اگه decrypt یا revoke سمت گوگل fail بشه (مثلاً چون کلید رمزنگاری
+    // بعداً عوض شده و توکن قدیمی دیگه قابل decrypt نیست)، باز هم باید کاربر از
+    // دیتابیس خودمون حذف بشه — وگرنه کاربر برای همیشه «متصل» فرض می‌شه و
+    // دیگه نمی‌تونه دوباره وصل بشه.
     try {
       const user = await getUser(env.DB, telegramId);
       if (user) {
-        const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
-        await revokeToken(refreshToken);
+        try {
+          const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
+          await revokeToken(refreshToken);
+        } catch (revokeErr) {
+          console.error("revoke/decrypt error (continuing to delete local record):", revokeErr);
+        }
       }
+    } finally {
       await deleteUser(env.DB, telegramId);
-      await ctx.editMessageText("✅ اتصال با گوگل‌درایو قطع شد. برای دوباره اتصال /start رو بزن.", {
-        reply_markup: new InlineKeyboard(),
-      });
-    } catch (err) {
-      console.error("disconnect error:", err);
-      await ctx.editMessageText("❌ خطا در قطع اتصال. دوباره امتحان کن.");
     }
+
+    await ctx.editMessageText("✅ اتصال با گوگل‌درایو قطع شد. برای دوباره اتصال /start رو بزن.", {
+      reply_markup: new InlineKeyboard(),
+    });
   });
 
   // ── لیست فایل‌ها ────────────────────────────────────────────
   bot.callbackQuery(/^list:(.*)$/, async (ctx) => {
     const telegramId = ctx.from.id;
-    const pageToken = ctx.match[1] || undefined;
+    // "0" یعنی صفحه‌ی اول (از دکمه‌ی منوی اصلی)، نه یه pageToken واقعی گوگل.
+    const raw = ctx.match[1];
+    const pageToken = raw && raw !== "0" ? raw : undefined;
     await ctx.answerCallbackQuery();
 
     const user = await getUser(env.DB, telegramId);
