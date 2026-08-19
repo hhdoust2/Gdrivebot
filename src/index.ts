@@ -12,24 +12,6 @@ import { decrypt, encrypt } from "./crypto";
 import { buildAuthUrl, exchangeCodeForTokens, getAccessToken, revokeToken } from "./oauth";
 import { getOrCreateFolder, uploadToDrive } from "./drive";
 
-/**
- * دکمه‌های کوتاه (مثل «🔙 بازگشت») رو با فاصله‌ی نامرئی (non-breaking space) پد می‌کنه
- * تا عرض بصری‌شون به دکمه‌های بلندتر نزدیک‌تر بشه. تلگرام هر دکمه رو دقیقاً به اندازه‌ی
- * طول متنش می‌سازه (نه عرض ثابت)، پس این تنها راه نزدیک‌کردن اندازه‌هاست.
- */
-function pad(label: string, targetLen = 18): string {
-  const len = [...label].length;
-  if (len >= targetLen) return label;
-  const totalPad = targetLen - len;
-  const left = Math.floor(totalPad / 2);
-  const right = totalPad - left;
-  return "\u00A0".repeat(left) + label + "\u00A0".repeat(right);
-}
-
-function mainMenuKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text(pad("🔓 قطع اتصال"), "disconnect");
-}
-
 export interface Env {
   DB: D1Database;
   BOT_TOKEN: string;
@@ -110,11 +92,18 @@ function createBot(env: Env): Bot {
     const telegramId = ctx.from?.id;
     if (!telegramId) return;
 
+    // فقط برای این‌که منوی دستورات (آیکون کنار جعبه‌ی تایپ) همیشه به‌روز باشه.
+    // idempotent هست، صدازدنش چندباره ضرری نداره.
+    await ctx.api.setMyCommands([
+      { command: "start", description: "شروع / اتصال به گوگل‌درایو" },
+      { command: "disconnect", description: "قطع اتصال از گوگل‌درایو" },
+    ]);
+
     const user = await getUser(env.DB, telegramId);
     if (user) {
-      await ctx.reply("✅ شما از قبل به گوگل‌درایو متصل هستید. کافیه یه فایل بفرستید تا در درایوتون ذخیره بشه.", {
-        reply_markup: mainMenuKeyboard(),
-      });
+      await ctx.reply(
+        "✅ شما از قبل به گوگل‌درایو متصل هستید. کافیه یه فایل بفرستید تا در درایوتون ذخیره بشه.\n(برای قطع اتصال از منوی دستورات، /disconnect را بزنید.)"
+      );
       return;
     }
 
@@ -277,8 +266,7 @@ function createBot(env: Env): Bot {
       await ctx.api.editMessageText(
         ctx.chat.id,
         statusMsg.message_id,
-        `✅ آپلود شد!\n📄 ${fileName}\n🔗 ${driveFile.webViewLink}`,
-        { reply_markup: mainMenuKeyboard() }
+        `✅ آپلود شد!\n📄 ${fileName}\n🔗 ${driveFile.webViewLink}`
       );
     } catch (err) {
       console.error("upload error:", err);
@@ -288,39 +276,6 @@ function createBot(env: Env): Bot {
         "❌ آپلود ناموفق بود. لطفاً دوباره امتحان کنید یا با /start اتصال رو تازه کنید."
       );
     }
-  });
-
-  // ── منوی اصلی ──────────────────────────────────────────────
-  bot.callbackQuery("menu", async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await ctx.editMessageText("منوی اصلی:", { reply_markup: mainMenuKeyboard() });
-  });
-
-  bot.callbackQuery("disconnect", async (ctx) => {
-    const telegramId = ctx.from.id;
-    await ctx.answerCallbackQuery();
-
-    // مهم: حتی اگه decrypt یا revoke سمت گوگل fail بشه (مثلاً چون کلید رمزنگاری
-    // بعداً عوض شده و توکن قدیمی دیگه قابل decrypt نیست)، باز هم باید کاربر از
-    // دیتابیس خودمون حذف بشه — وگرنه کاربر برای همیشه «متصل» فرض می‌شه و
-    // دیگه نمی‌تونه دوباره وصل بشه.
-    try {
-      const user = await getUser(env.DB, telegramId);
-      if (user) {
-        try {
-          const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
-          await revokeToken(refreshToken);
-        } catch (revokeErr) {
-          console.error("revoke/decrypt error (continuing to delete local record):", revokeErr);
-        }
-      }
-    } finally {
-      await deleteUser(env.DB, telegramId);
-    }
-
-    await ctx.editMessageText("✅ اتصال با گوگل‌درایو قطع شد. برای دوباره اتصال /start رو بزن.", {
-      reply_markup: new InlineKeyboard(),
-    });
   });
 
   return bot;
@@ -386,7 +341,6 @@ async function handleOAuthCallback(req: Request, env: Env): Promise<Response> {
     body: JSON.stringify({
       chat_id: oauthState.telegram_id,
       text: "✅ اتصال به گوگل‌درایو با موفقیت انجام شد! از الان هر فایلی که همین‌جا بفرستید، خودکار در پوشه‌ی اختصاصی‌تون در درایو ذخیره می‌شه.",
-      reply_markup: mainMenuKeyboard(),
     }),
   });
 
