@@ -8,6 +8,7 @@ export interface UserRow {
 export interface OAuthStateRow {
   state: string;
   telegram_id: number;
+  created_at: string;
 }
 
 export async function getUser(db: D1Database, telegramId: number): Promise<UserRow | null> {
@@ -61,7 +62,7 @@ export async function createOAuthState(
 
 export async function getOAuthState(db: D1Database, state: string): Promise<OAuthStateRow | null> {
   const row = await db
-    .prepare("SELECT state, telegram_id FROM oauth_state WHERE state = ?")
+    .prepare("SELECT state, telegram_id, created_at FROM oauth_state WHERE state = ?")
     .bind(state)
     .first<OAuthStateRow>();
   return row ?? null;
