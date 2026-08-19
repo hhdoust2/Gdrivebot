@@ -23,13 +23,27 @@ import {
 // سقفی که برای «ارسال» فایل توسط ربات به کاربر در تلگرام امن حساب می‌شه.
 const MAX_SEND_BYTES = 50 * 1024 * 1024;
 
+/**
+ * دکمه‌های کوتاه (مثل «🔙 بازگشت») رو با فاصله‌ی نامرئی (non-breaking space) پد می‌کنه
+ * تا عرض بصری‌شون به دکمه‌های بلندتر نزدیک‌تر بشه. تلگرام هر دکمه رو دقیقاً به اندازه‌ی
+ * طول متنش می‌سازه (نه عرض ثابت)، پس این تنها راه نزدیک‌کردن اندازه‌هاست.
+ */
+function pad(label: string, targetLen = 18): string {
+  const len = [...label].length;
+  if (len >= targetLen) return label;
+  const totalPad = targetLen - len;
+  const left = Math.floor(totalPad / 2);
+  const right = totalPad - left;
+  return "\u00A0".repeat(left) + label + "\u00A0".repeat(right);
+}
+
 function mainMenuKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text("📤 آپلود فایل", "upload_hint")
+    .text(pad("📤 آپلود فایل"), "upload_hint")
     .row()
-    .text("📋 لیست فایل‌ها", "list:0")
+    .text(pad("📋 لیست فایل‌ها"), "list:0")
     .row()
-    .text("🔓 قطع اتصال", "disconnect");
+    .text(pad("🔓 قطع اتصال"), "disconnect");
 }
 
 function fileNameLabel(name: string): string {
@@ -325,7 +339,7 @@ function createBot(env: Env): Bot {
   bot.callbackQuery("upload_hint", async (ctx) => {
     await ctx.answerCallbackQuery();
     await ctx.editMessageText("📤 کافیه یه فایل (سند، عکس، ویدیو یا صدا) همین‌جا برام بفرستی.", {
-      reply_markup: new InlineKeyboard().text("🔙 بازگشت", "menu"),
+      reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), "menu"),
     });
   });
 
@@ -376,23 +390,23 @@ function createBot(env: Env): Bot {
 
       if (files.length === 0 && !pageToken) {
         await ctx.editMessageText("📭 هنوز فایلی در پوشه‌ی درایوت نیست.", {
-          reply_markup: new InlineKeyboard().text("🔙 بازگشت", "menu"),
+          reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), "menu"),
         });
         return;
       }
 
       const kb = new InlineKeyboard();
       for (const f of files) {
-        kb.text(`📄 ${fileNameLabel(f.name)}`, `file:${f.id}`).row();
+        kb.text(pad(`📄 ${fileNameLabel(f.name)}`), `file:${f.id}`).row();
       }
-      if (nextPageToken) kb.text("➡️ صفحه‌ی بعد", `list:${nextPageToken}`).row();
-      kb.text("🔙 بازگشت", "menu");
+      if (nextPageToken) kb.text(pad("➡️ صفحه‌ی بعد"), `list:${nextPageToken}`).row();
+      kb.text(pad("🔙 بازگشت"), "menu");
 
       await ctx.editMessageText("📋 فایل‌های تو در درایو:", { reply_markup: kb });
     } catch (err) {
       console.error("list error:", err);
       await ctx.editMessageText("❌ خطا در دریافت لیست فایل‌ها. دوباره امتحان کن.", {
-        reply_markup: new InlineKeyboard().text("🔙 بازگشت", "menu"),
+        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), "menu"),
       });
     }
   });
@@ -411,11 +425,11 @@ function createBot(env: Env): Bot {
       const meta = await getFileMeta(accessToken, fileId);
 
       const kb = new InlineKeyboard()
-        .text("⬇️ دانلود", `dl:${fileId}`)
+        .text(pad("⬇️ دانلود"), `dl:${fileId}`)
         .row()
-        .text("🗑 حذف", `del:${fileId}`)
+        .text(pad("🗑 حذف"), `del:${fileId}`)
         .row()
-        .text("🔙 بازگشت به لیست", "list:0");
+        .text(pad("🔙 بازگشت به لیست"), "list:0");
 
       await ctx.editMessageText(
         `📄 ${meta.name}\n${formatSize(meta.size) ? `حجم: ${formatSize(meta.size)}` : ""}`,
@@ -424,7 +438,7 @@ function createBot(env: Env): Bot {
     } catch (err) {
       console.error("file detail error:", err);
       await ctx.editMessageText("❌ خطا در دریافت اطلاعات فایل.", {
-        reply_markup: new InlineKeyboard().text("🔙 بازگشت", "list:0"),
+        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), "list:0"),
       });
     }
   });
@@ -451,7 +465,7 @@ function createBot(env: Env): Bot {
         await ctx.editMessageText(
           `📦 این فایل بزرگ‌تر از ${MAX_SEND_BYTES / 1024 / 1024} مگابایته.\n\n🔗 برای دانلود از لینک زیر استفاده کن:\n${linkText}`,
           {
-            reply_markup: new InlineKeyboard().text("🔙 بازگشت", `file:${fileId}`),
+            reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), `file:${fileId}`),
           }
         );
         return;
@@ -462,7 +476,7 @@ function createBot(env: Env): Bot {
     } catch (err) {
       console.error("download error:", err);
       await ctx.editMessageText("❌ دانلود ناموفق بود. دوباره امتحان کن.", {
-        reply_markup: new InlineKeyboard().text("🔙 بازگشت", `file:${fileId}`),
+        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), `file:${fileId}`),
       });
     }
   });
@@ -473,9 +487,9 @@ function createBot(env: Env): Bot {
     await ctx.answerCallbackQuery();
 
     const kb = new InlineKeyboard()
-      .text("✅ بله، حذف کن", `delok:${fileId}`)
+      .text(pad("✅ بله، حذف کن"), `delok:${fileId}`)
       .row()
-      .text("🔙 انصراف", `file:${fileId}`);
+      .text(pad("🔙 انصراف"), `file:${fileId}`);
 
     await ctx.editMessageText("❗️ مطمئنی می‌خوای این فایل رو برای همیشه حذف کنی؟", {
       reply_markup: kb,
@@ -494,12 +508,12 @@ function createBot(env: Env): Bot {
       const { accessToken } = await prepareDriveAccess(env, telegramId, user);
       await deleteFile(accessToken, fileId);
       await ctx.editMessageText("🗑 فایل حذف شد.", {
-        reply_markup: new InlineKeyboard().text("🔙 بازگشت به لیست", "list:0"),
+        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت به لیست"), "list:0"),
       });
     } catch (err) {
       console.error("delete error:", err);
       await ctx.editMessageText("❌ حذف ناموفق بود. دوباره امتحان کن.", {
-        reply_markup: new InlineKeyboard().text("🔙 بازگشت", `file:${fileId}`),
+        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), `file:${fileId}`),
       });
     }
   });
