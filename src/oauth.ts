@@ -8,10 +8,14 @@ const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
 // نه به کل درایو کاربر. این هم امن‌تره و هم تایید گوگل (verification) ساده‌تری داره.
 const SCOPE = "https://www.googleapis.com/auth/drive.file";
 
+function redirectUri(env: Env): string {
+  return `${env.BASE_URL.replace(/\/+$/, "")}/oauth/callback`;
+}
+
 export function buildAuthUrl(env: Env, state: string): string {
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
-    redirect_uri: `${env.BASE_URL}/oauth/callback`,
+    redirect_uri: redirectUri(env),
     response_type: "code",
     scope: SCOPE,
     access_type: "offline",
@@ -37,7 +41,7 @@ export async function exchangeCodeForTokens(env: Env, code: string): Promise<Tok
       code,
       client_id: env.GOOGLE_CLIENT_ID,
       client_secret: env.GOOGLE_CLIENT_SECRET,
-      redirect_uri: `${env.BASE_URL}/oauth/callback`,
+      redirect_uri: redirectUri(env),
       grant_type: "authorization_code",
     }),
   });
