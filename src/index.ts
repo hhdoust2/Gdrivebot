@@ -23,6 +23,10 @@ export interface Env {
   // اختیاری: فقط اگر سرویس Railway برای فایل‌های بزرگ راه‌اندازی شده باشه لازمه
   RAILWAY_LARGE_FILE_URL?: string;
   RAILWAY_SHARED_SECRET?: string;
+  // اختیاری: اگه ست بشه (مثلاً @mychannel)، استفاده از ربات مشروط به عضویت در این کانال می‌شه.
+  // ربات باید ادمین همون کانال باشه تا بتونه وضعیت عضویت رو چک کنه.
+  // برای غیرفعال‌کردن این قابلیت، فقط این متغیر رو از Secrets حذف/خالی کن — نیازی به تغییر کد نیست.
+  CHANNEL_USERNAME?: string;
 }
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // سقف Bot API معمولی تلگرام
@@ -50,6 +54,33 @@ function isRateLimited(telegramId: number): boolean {
   timestamps.push(now);
   rateLimitMap.set(telegramId, timestamps);
   return false;
+}
+
+/** آیا کاربر عضو کانال اجباری هست؟ اگه CHANNEL_USERNAME ست نشده باشه، همیشه true. */
+async function isChannelMember(env: Env, telegramId: number): Promise<boolean> {
+  if (!env.CHANNEL_USERNAME) return true;
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${env.BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(
+        env.CHANNEL_USERNAME
+      )}&user_id=${telegramId}`
+    );
+    const data = await res.json<{ ok: boolean; result?: { status: string } }>();
+    if (!data.ok || !data.result) return false;
+    return ["member", "administrator", "creator"].includes(data.result.status);
+  } catch (err) {
+    console.error("channel membership check failed:", err);
+    // اگه چک fail شد (مثلاً ربات ادمین کانال نیست)، برای جلوگیری از قفل‌کردن کامل ربات، اجازه می‌دیم.
+    return true;
+  }
+}
+
+function joinChannelKeyboard(env: Env): InlineKeyboard {
+  const handle = (env.CHANNEL_USERNAME || "").replace(/^@/, "");
+  return new InlineKeyboard()
+    .url("📢 عضویت در کانال", `https://t.me/${handle}`)
+    .row()
+    .text("✅ عضو شدم، بررسی کن", "check_membership");
 }
 
 /** آیدی پوشه‌ی اختصاصی ربات رو برمی‌گردونه؛ اگه در دیتابیس کش نشده بود، پیدا/می‌سازه و کش می‌کنه. */
@@ -85,6 +116,42 @@ function createBot(env: Env): Bot {
       // فقط خاموش می‌کنیم، جواب ندادن بهتره تا spam filter‌ها فکر نکنند مجوز داریم
       return;
     }
+    await next();
+  });
+
+  // عضویت اجباری در کانال (اگه CHANNEL_USERNAME تنظیم شده باشه)
+  bot.use(async (ctx, next) => {
+    if (!env.CHANNEL_USERNAME) {
+      await next();
+      return;
+    }
+    const telegramId = ctx.from?.id;
+    if (!telegramId) {
+      await next();
+      return;
+    }
+
+    const member = await isChannelMember(env, telegramId);
+
+    if (ctx.callbackQuery?.data === "check_membership") {
+      if (member) {
+        await ctx.answerCallbackQuery({ text: "✅ عضویت تأیید شد!" });
+        await ctx.deleteMessage().catch(() => {});
+        // بعد از تأیید، اجازه می‌دیم کاربر دوباره /start بزنه یا فایل بفرسته.
+        await ctx.reply("✅ عضویت شما تأیید شد. حالا می‌تونید از ربات استفاده کنید — /start رو بزنید.");
+      } else {
+        await ctx.answerCallbackQuery({ text: "❌ هنوز عضو کانال نشدی.", show_alert: true });
+      }
+      return; // این آپدیت اینجا کامل مدیریت شد
+    }
+
+    if (!member) {
+      await ctx.reply("📢 برای استفاده از ربات، اول باید عضو کانال ما بشی:", {
+        reply_markup: joinChannelKeyboard(env),
+      });
+      return;
+    }
+
     await next();
   });
 
