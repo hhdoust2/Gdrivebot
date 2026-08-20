@@ -210,7 +210,7 @@ function createBot(env: Env): Bot {
     // idempotent هست، صدازدنش چندباره ضرری نداره.
     await ctx.api.setMyCommands([
       { command: "start", description: "شروع / اتصال به گوگل‌درایو" },
-      { command: "upload", description: "راهنمای آپلود فایل" },
+      { command: "upload", description: " آپلود فایل" },
       { command: "list", description: "لیست فایل‌ها" },
       { command: "disconnect", description: "قطع اتصال از گوگل‌درایو" },
     ]);
