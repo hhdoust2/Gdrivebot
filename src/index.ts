@@ -210,6 +210,7 @@ function createBot(env: Env): Bot {
     // idempotent هست، صدازدنش چندباره ضرری نداره.
     await ctx.api.setMyCommands([
       { command: "start", description: "شروع / اتصال به گوگل‌درایو" },
+      { command: "upload", description: "راهنمای آپلود فایل" },
       { command: "list", description: "لیست فایل‌ها" },
       { command: "disconnect", description: "قطع اتصال از گوگل‌درایو" },
     ]);
@@ -257,9 +258,24 @@ function createBot(env: Env): Bot {
     );
   });
 
+  bot.command("upload", async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const user = await getUser(env.DB, telegramId);
+    if (!user) {
+      await ctx.reply("اول باید حساب گوگل‌درایوت رو وصل کنی — /start رو بزن.");
+      return;
+    }
+
+    await ctx.reply(
+      `📤 کافیه یه فایل (سند، عکس، ویدیو یا صدا) همین‌جا برام بفرستی تا خودکار در درایوت ذخیره بشه.\n(سقف ${MAX_FILE_BYTES / 1024 / 1024} مگابایت)`
+    );
+  });
+
   bot.command("help", async (ctx) => {
     await ctx.reply(
-      "دستورها:\n/start — اتصال به گوگل‌درایو\n/list — لیست فایل‌ها\n/disconnect — قطع اتصال\n\n" +
+      "دستورها:\n/start — اتصال به گوگل‌درایو\n/upload — راهنمای آپلود\n/list — لیست فایل‌ها\n/disconnect — قطع اتصال\n\n" +
         "بعد از اتصال، کافیه هر فایلی (سند، عکس، ویدیو یا صدا) بفرستید تا در درایو شما آپلود بشه.\n" +
         `📎 فایل تا ${MAX_FILE_BYTES / 1024 / 1024} مگابایت: مستقیم و سریع.\n` +
         "📦 فایل بزرگ‌تر: در پس‌زمینه با کمی تأخیر بیشتر آپلود می‌شه (اگه سرویس فایل‌های بزرگ فعال باشه)."
@@ -395,6 +411,14 @@ function createBot(env: Env): Bot {
 
   bot.command("list", async (ctx) => {
     await sendFileList(ctx, env, undefined);
+  });
+
+  // ── بازگشت به منوی اصلی ─────────────────────────────────────
+  bot.callbackQuery("menu", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(
+      "📋 منو:\nیه فایل بفرست تا آپلود بشه، یا /list رو بزن تا فایل‌هات رو ببینی."
+    );
   });
 
   // ── لیست فایل‌ها (صفحه‌بندی) ────────────────────────────────
@@ -538,7 +562,7 @@ async function sendFileList(ctx: any, env: Env, pageToken: string | undefined, i
     const { files, nextPageToken } = await listFilesInFolder(accessToken, folderId, pageToken);
 
     if (files.length === 0 && !pageToken) {
-      await send("📭 هنوز فایلی در پوشه‌ی درایوت نیست.", new InlineKeyboard());
+      await send("📭 هنوز فایلی در پوشه‌ی درایوت نیست.", new InlineKeyboard().text(pad("🔙 بازگشت به منو"), "menu"));
       return;
     }
 
@@ -547,11 +571,12 @@ async function sendFileList(ctx: any, env: Env, pageToken: string | undefined, i
       kb.text(pad(`📄 ${fileNameLabel(f.name)}`), `file:${f.id}`).row();
     }
     if (nextPageToken) kb.text(pad("➡️ صفحه‌ی بعد"), `list:${nextPageToken}`).row();
+    kb.text(pad("🔙 بازگشت به منو"), "menu");
 
     await send("📋 فایل‌های تو در درایو:", kb);
   } catch (err) {
     console.error("list error:", err);
-    await send("❌ خطا در دریافت لیست فایل‌ها. دوباره امتحان کن.", new InlineKeyboard());
+    await send("❌ خطا در دریافت لیست فایل‌ها. دوباره امتحان کن.", new InlineKeyboard().text(pad("🔙 بازگشت به منو"), "menu"));
   }
 }
 
