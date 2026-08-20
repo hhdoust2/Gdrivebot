@@ -1,119 +1,150 @@
-import express from "express";
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json());
 
-const { PORT = 8080, LOCAL_API_PORT = 8081, SHARED_SECRET } = process.env;
+const PORT = process.env.PORT || 8080;
+const TELEGRAM_LOCAL_PORT = process.env.TELEGRAM_LOCAL_PORT || 8081;
+const SHARED_SECRET = process.env.RAILWAY_SHARED_SECRET;
 
 if (!SHARED_SECRET) {
-  console.warn("⚠️ SHARED_SECRET تنظیم نشده — هر کسی می‌تونه به این سرویس درخواست بزنه!");
+  console.error("خطا: RAILWAY_SHARED_SECRET تنظیم نشده.");
+  process.exit(1);
 }
 
 function requireAuth(req, res, next) {
-  const header = req.headers["authorization"] || "";
-  if (SHARED_SECRET && header !== `Bearer ${SHARED_SECRET}`) {
+  const auth = req.headers.authorization || "";
+  if (auth !== `Bearer ${SHARED_SECRET}`) {
     return res.status(401).json({ error: "unauthorized" });
   }
   next();
 }
 
-app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get("/", (_req, res) => res.send("Railway large-file service is running."));
 
-// این endpoint فوراً 202 برمی‌گردونه و کار واقعی آپلود در پس‌زمینه ادامه پیدا می‌کنه؛
-// نتیجه‌ی نهایی مستقیماً با ویرایش همون پیام تلگرام به کاربر اطلاع داده می‌شه.
+// نکته: سریع ۲۰۲ برمی‌گردونیم و کار سنگین (دانلود+آپلود) رو در پس‌زمینه انجام می‌دیم،
+// چون Cloudflare Worker منتظر جواب سریع می‌مونه، نه کل فرآیند.
 app.post("/upload-large", requireAuth, (req, res) => {
-  const { fileId, botToken, driveAccessToken, fileName, mimeType, chatId, statusMessageId } =
+  const { fileId, botToken, driveAccessToken, fileName, mimeType, chatId, statusMessageId, folderId } =
     req.body || {};
 
   if (!fileId || !botToken || !driveAccessToken || !fileName || !chatId) {
     return res.status(400).json({ error: "missing required fields" });
   }
 
-  res.status(202).json({ accepted: true });
+  res.status(202).json({ ok: true, message: "processing started" });
 
-  processUpload({ fileId, botToken, driveAccessToken, fileName, mimeType, chatId, statusMessageId }).catch(
-    (err) => console.error("background upload crashed:", err)
+  // پردازش در پس‌زمینه (بعد از ارسال جواب)
+  processLargeFile({ fileId, botToken, driveAccessToken, fileName, mimeType, chatId, statusMessageId, folderId }).catch(
+    (err) => console.error("processLargeFile error:", err)
   );
 });
 
-async function processUpload({ fileId, botToken, driveAccessToken, fileName, mimeType, chatId, statusMessageId }) {
-  const localBase = `http://127.0.0.1:${LOCAL_API_PORT}`;
-
+async function processLargeFile({
+  fileId,
+  botToken,
+  driveAccessToken,
+  fileName,
+  mimeType,
+  chatId,
+  statusMessageId,
+  folderId,
+}) {
+  let localFilePath;
   try {
-    // ۱. گرفتن مسیر فایل از سرور محلی telegram-bot-api (سقف تا ۲ گیگ)
-    const fileInfoRes = await fetch(`${localBase}/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`);
-    const fileInfo = await fileInfoRes.json();
-    if (!fileInfo.ok) throw new Error(`getFile failed: ${JSON.stringify(fileInfo)}`);
+    // ۱. از سرور محلی Bot API بخواه فایل رو دانلود کنه (سقف تا ۲ گیگابایت، نه ۲۰ مگابایت)
+    localFilePath = await getFileViaLocalApi(botToken, fileId);
 
-    const filePath = fileInfo.result.file_path;
-    const fileSize = fileInfo.result.file_size;
+    // ۲. آپلود resumable به گوگل‌درایو (برای فایل‌های بزرگ، مطمئن‌تر از یه درخواست massive)
+    const driveFile = await uploadToDriveResumable(driveAccessToken, localFilePath, fileName, mimeType, folderId);
 
-    // ۲. دانلود استریمی فایل از سرور محلی
-    const downloadUrl = `${localBase}/file/bot${botToken}/${filePath}`;
-    const fileRes = await fetch(downloadUrl);
-    if (!fileRes.ok || !fileRes.body) throw new Error(`telegram download failed: ${fileRes.status}`);
-
-    // ۳. باز کردن یک سشن Resumable Upload در گوگل‌درایو
-    const sessionRes = await fetch(
-      "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${driveAccessToken}`,
-          "Content-Type": "application/json; charset=UTF-8",
-          ...(fileSize ? { "X-Upload-Content-Length": String(fileSize) } : {}),
-          ...(mimeType ? { "X-Upload-Content-Type": mimeType } : {}),
-        },
-        body: JSON.stringify({ name: fileName }),
-      }
-    );
-    if (!sessionRes.ok) throw new Error(`resumable session failed: ${await sessionRes.text()}`);
-    const uploadUrl = sessionRes.headers.get("location");
-    if (!uploadUrl) throw new Error("Google did not return an upload URL");
-
-    // ۴. استریم مستقیم از تلگرام به گوگل‌درایو، بدون بافر کردن کل فایل در حافظه
-    const putRes = await fetch(uploadUrl, {
-      method: "PUT",
-      headers: {
-        "Content-Type": mimeType || "application/octet-stream",
-        ...(fileSize ? { "Content-Length": String(fileSize) } : {}),
-      },
-      body: fileRes.body,
-      duplex: "half",
-    });
-    if (!putRes.ok) throw new Error(`drive upload failed: ${await putRes.text()}`);
-    const driveFile = await putRes.json();
-
-    await notifyTelegram(
+    // ۳. اطلاع به کاربر در تلگرام (از API عمومی، چون فقط متنه، محدودیت حجم نداره)
+    await telegramEditMessage(
       botToken,
       chatId,
       statusMessageId,
-      `✅ آپلود شد!\n📄 ${fileName}\n🔗 ${driveFile.webViewLink}`
+      `✅ آپلود فایل بزرگ کامل شد!\n📄 ${fileName}\n🔗 ${driveFile.webViewLink}`
     );
   } catch (err) {
-    console.error("upload-large error:", err);
-    await notifyTelegram(botToken, chatId, statusMessageId, "❌ آپلود فایل بزرگ ناموفق بود. دوباره امتحان کنید.");
+    console.error("large file processing failed:", err);
+    await telegramEditMessage(
+      botToken,
+      chatId,
+      statusMessageId,
+      "❌ آپلود فایل بزرگ ناموفق بود. لطفاً دوباره امتحان کنید."
+    ).catch(() => {});
+  } finally {
+    if (localFilePath) {
+      fs.unlink(localFilePath, () => {}); // پاک‌سازی فایل موقت، بدون توقف روی خطا
+    }
   }
 }
 
-async function notifyTelegram(botToken, chatId, statusMessageId, text) {
-  const base = `https://api.telegram.org/bot${botToken}`;
-  const url = statusMessageId ? `${base}/editMessageText` : `${base}/sendMessage`;
-  const body = statusMessageId
-    ? { chat_id: chatId, message_id: statusMessageId, text }
-    : { chat_id: chatId, text };
+/** از سرور محلی Bot API می‌خواد فایل رو دانلود کنه؛ چون --local فعاله، مسیر فایل روی دیسک همین کانتینر برمی‌گرده. */
+async function getFileViaLocalApi(botToken, fileId) {
+  const getFileRes = await fetch(
+    `http://localhost:${TELEGRAM_LOCAL_PORT}/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`
+  );
+  const getFileData = await getFileRes.json();
+  if (!getFileData.ok) throw new Error(`local getFile failed: ${JSON.stringify(getFileData)}`);
 
-  try {
-    await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    console.error("notifyTelegram failed:", err);
+  const filePath = getFileData.result.file_path;
+  // با --local، file_path یه مسیر واقعی روی دیسک همین کانتینره (نه یه URL که باید دوباره دانلود بشه)
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`local file not found at ${filePath}`);
   }
+  return filePath;
+}
+
+/** آپلود resumable به گوگل‌درایو — مناسب فایل‌های بزرگ (چند مرحله‌ای، مقاوم در برابر قطعی). */
+async function uploadToDriveResumable(accessToken, localFilePath, fileName, mimeType, folderId) {
+  const stat = fs.statSync(localFilePath);
+  const metadata = { name: fileName, ...(folderId ? { parents: [folderId] } : {}) };
+
+  // مرحله ۱: باز کردن یه session آپلود resumable
+  const initRes = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": mimeType || "application/octet-stream",
+        "X-Upload-Content-Length": String(stat.size),
+      },
+      body: JSON.stringify(metadata),
+    }
+  );
+  if (!initRes.ok) throw new Error(`resumable init failed (${initRes.status}): ${await initRes.text()}`);
+  const uploadUrl = initRes.headers.get("location");
+  if (!uploadUrl) throw new Error("no resumable upload URL returned");
+
+  // مرحله ۲: آپلود کل بایت‌ها (Node می‌تونه stream کنه، فایل کامل تو حافظه لود نمی‌شه)
+  const stream = fs.createReadStream(localFilePath);
+  const uploadRes = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Length": String(stat.size),
+      "Content-Type": mimeType || "application/octet-stream",
+    },
+    // @ts-ignore - Node fetch duplex requirement for streaming bodies
+    duplex: "half",
+    body: stream,
+  });
+  if (!uploadRes.ok) throw new Error(`resumable upload failed (${uploadRes.status}): ${await uploadRes.text()}`);
+  return uploadRes.json();
+}
+
+async function telegramEditMessage(botToken, chatId, messageId, text) {
+  await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, text }),
+  });
 }
 
 app.listen(PORT, () => {
-  console.log(`large-file service listening on port ${PORT}`);
+  console.log(`Large-file service listening on port ${PORT}`);
 });

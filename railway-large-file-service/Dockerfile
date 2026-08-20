@@ -1,22 +1,21 @@
-# مرحله‌ی اول: فقط برای گرفتن باینری آماده‌ی telegram-bot-api
-FROM aiogram/telegram-bot-api:latest AS tba
+FROM aiogram/telegram-bot-api:latest AS tgapi
 
 FROM node:20-slim
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=tba /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
+# باینری telegram-bot-api رو از ایمیج قبلی کپی می‌کنیم (build از سورس خیلی کند و سنگینه)
+COPY --from=tgapi /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
 
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
-
-COPY server.js entrypoint.sh ./
+COPY server.js ./
+COPY entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
-ENV LOCAL_API_PORT=8081
+# دیتای دانلودشده‌ی سرور محلی تلگرام اینجا ذخیره می‌شه
+RUN mkdir -p /data/telegram-bot-api
+
+ENV TELEGRAM_LOCAL_PORT=8081
 EXPOSE 8080
 
-CMD ["./entrypoint.sh"]
+ENTRYPOINT ["./entrypoint.sh"]

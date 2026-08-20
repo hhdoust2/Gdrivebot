@@ -2,22 +2,23 @@
 set -e
 
 if [ -z "$TELEGRAM_API_ID" ] || [ -z "$TELEGRAM_API_HASH" ]; then
-  echo "خطا: TELEGRAM_API_ID و TELEGRAM_API_HASH باید تنظیم شده باشن (از my.telegram.org بگیرید)."
+  echo "خطا: TELEGRAM_API_ID و TELEGRAM_API_HASH باید تنظیم شده باشن (از my.telegram.org)."
   exit 1
 fi
 
-mkdir -p /data/telegram-bot-api/tmp
-
-# اجرای سرور محلی Bot API در پس‌زمینه (سقف فایل رو تا ۲ گیگ می‌بره)
+# سرور محلی Bot API رو در پس‌زمینه اجرا می‌کنیم (فقط داخل همین کانتینر در دسترسه، به بیرون expose نمی‌شه)
 telegram-bot-api \
   --api-id="$TELEGRAM_API_ID" \
   --api-hash="$TELEGRAM_API_HASH" \
-  --http-port="${LOCAL_API_PORT:-8081}" \
+  --local \
+  --http-port="$TELEGRAM_LOCAL_PORT" \
   --dir=/data/telegram-bot-api \
   --temp-dir=/data/telegram-bot-api/tmp &
 
-# صبر کوتاه تا سرور محلی بالا بیاد
+# چند ثانیه صبر می‌کنیم تا سرور محلی بالا بیاد
 sleep 3
 
-# سرور Node به‌عنوان پروسه‌ی اصلی (پورتی که Railway بهش ترافیک می‌فرسته)
+echo "Telegram local Bot API server started on port $TELEGRAM_LOCAL_PORT"
+
+# اپ Node رو روی پورتی که Railway می‌ده (متغیر PORT) اجرا می‌کنیم
 exec node server.js
