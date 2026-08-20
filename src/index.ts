@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard, webhookCallback } from "grammy";
+import { Bot, InlineKeyboard, InputFile, webhookCallback } from "grammy";
 import {
   createOAuthState,
   deleteOAuthState,
@@ -7,10 +7,18 @@ import {
   getUser,
   setUserFolder,
   upsertUserToken,
+  UserRow,
 } from "./db";
 import { decrypt, encrypt } from "./crypto";
 import { buildAuthUrl, exchangeCodeForTokens, getAccessToken, revokeToken } from "./oauth";
-import { getOrCreateFolder, uploadToDrive } from "./drive";
+import {
+  deleteFile,
+  downloadFileBytes,
+  getFileMeta,
+  getOrCreateFolder,
+  listFilesInFolder,
+  uploadToDrive,
+} from "./drive";
 
 export interface Env {
   DB: D1Database;
@@ -29,7 +37,34 @@ export interface Env {
   CHANNEL_USERNAME?: string;
 }
 
-const MAX_FILE_BYTES = 20 * 1024 * 1024; // سقف Bot API معمولی تلگرام
+const MAX_FILE_BYTES = 20 * 1024 * 1024; // سقف Bot API معمولی تلگرام برای دریافت فایل از کاربر
+const MAX_SEND_BYTES = 50 * 1024 * 1024; // سقفی که برای «ارسال» فایل توسط ربات به کاربر امن حساب می‌شه
+
+/**
+ * دکمه‌های کوتاه (مثل «🔙 بازگشت») رو با فاصله‌ی نامرئی (non-breaking space) پد می‌کنه
+ * تا عرض بصری‌شون به دکمه‌های بلندتر نزدیک‌تر بشه. تلگرام هر دکمه رو دقیقاً به اندازه‌ی
+ * طول متنش می‌سازه (نه عرض ثابت)، پس این تنها راه نزدیک‌کردن اندازه‌هاست.
+ */
+function pad(label: string, targetLen = 18): string {
+  const len = [...label].length;
+  if (len >= targetLen) return label;
+  const totalPad = targetLen - len;
+  const left = Math.floor(totalPad / 2);
+  const right = totalPad - left;
+  return "\u00A0".repeat(left) + label + "\u00A0".repeat(right);
+}
+
+function fileNameLabel(name: string): string {
+  return name.length > 28 ? name.slice(0, 27) + "…" : name;
+}
+
+function formatSize(size?: string): string {
+  if (!size) return "";
+  const bytes = Number(size);
+  if (!Number.isFinite(bytes)) return "";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 // Rate limiting ساده: هر user حداکثر ۱۰ تا بر ثانیه درخواست
 const rateLimitMap = new Map<number, number[]>();
@@ -94,6 +129,18 @@ async function ensureFolder(
   const folderId = await getOrCreateFolder(accessToken);
   await setUserFolder(env.DB, telegramId, folderId);
   return folderId;
+}
+
+/** توکن دسترسیِ درایو + آیدی پوشه رو برای یک کاربر آماده می‌کنه (برای استفاده در callback handlerها). */
+async function prepareDriveAccess(
+  env: Env,
+  telegramId: number,
+  user: UserRow
+): Promise<{ accessToken: string; folderId: string }> {
+  const refreshToken = await decrypt(env.ENCRYPTION_KEY, user.encrypted_refresh_token, user.iv);
+  const accessToken = await getAccessToken(env, refreshToken);
+  const folderId = await ensureFolder(env, telegramId, user, accessToken);
+  return { accessToken, folderId };
 }
 
 function createBot(env: Env): Bot {
@@ -163,13 +210,14 @@ function createBot(env: Env): Bot {
     // idempotent هست، صدازدنش چندباره ضرری نداره.
     await ctx.api.setMyCommands([
       { command: "start", description: "شروع / اتصال به گوگل‌درایو" },
+      { command: "list", description: "لیست فایل‌ها" },
       { command: "disconnect", description: "قطع اتصال از گوگل‌درایو" },
     ]);
 
     const user = await getUser(env.DB, telegramId);
     if (user) {
       await ctx.reply(
-        "✅ شما از قبل به گوگل‌درایو متصل هستید. کافیه یه فایل بفرستید تا در درایوتون ذخیره بشه.\n(برای قطع اتصال از منوی دستورات، /disconnect را بزنید.)"
+        "✅ شما از قبل به گوگل‌درایو متصل هستید. کافیه یه فایل بفرستید تا در درایوتون ذخیره بشه.\n(برای دیدن فایل‌ها /list و برای قطع اتصال /disconnect را بزنید.)"
       );
       return;
     }
@@ -211,7 +259,7 @@ function createBot(env: Env): Bot {
 
   bot.command("help", async (ctx) => {
     await ctx.reply(
-      "دستورها:\n/start — اتصال به گوگل‌درایو\n/disconnect — قطع اتصال\n\n" +
+      "دستورها:\n/start — اتصال به گوگل‌درایو\n/list — لیست فایل‌ها\n/disconnect — قطع اتصال\n\n" +
         "بعد از اتصال، کافیه هر فایلی (سند، عکس، ویدیو یا صدا) بفرستید تا در درایو شما آپلود بشه.\n" +
         `📎 فایل تا ${MAX_FILE_BYTES / 1024 / 1024} مگابایت: مستقیم و سریع.\n` +
         "📦 فایل بزرگ‌تر: در پس‌زمینه با کمی تأخیر بیشتر آپلود می‌شه (اگه سرویس فایل‌های بزرگ فعال باشه)."
@@ -345,7 +393,166 @@ function createBot(env: Env): Bot {
     }
   });
 
+  bot.command("list", async (ctx) => {
+    await sendFileList(ctx, env, undefined);
+  });
+
+  // ── لیست فایل‌ها (صفحه‌بندی) ────────────────────────────────
+  bot.callbackQuery(/^list:(.*)$/, async (ctx) => {
+    const raw = ctx.match[1];
+    const pageToken = raw && raw !== "0" ? raw : undefined;
+    await ctx.answerCallbackQuery();
+    await sendFileList(ctx, env, pageToken, true);
+  });
+
+  // ── جزئیات یک فایل ─────────────────────────────────────────
+  bot.callbackQuery(/^file:(.+)$/, async (ctx) => {
+    const telegramId = ctx.from.id;
+    const fileId = ctx.match[1];
+    await ctx.answerCallbackQuery();
+
+    const user = await getUser(env.DB, telegramId);
+    if (!user) return;
+
+    try {
+      const { accessToken } = await prepareDriveAccess(env, telegramId, user);
+      const meta = await getFileMeta(accessToken, fileId);
+
+      const kb = new InlineKeyboard()
+        .text(pad("⬇️ دانلود"), `dl:${fileId}`)
+        .row()
+        .text(pad("🗑 حذف"), `del:${fileId}`)
+        .row()
+        .text(pad("🔙 بازگشت به لیست"), "list:0");
+
+      await ctx.editMessageText(
+        `📄 ${meta.name}\n${formatSize(meta.size) ? `حجم: ${formatSize(meta.size)}` : ""}`,
+        { reply_markup: kb }
+      );
+    } catch (err) {
+      console.error("file detail error:", err);
+      await ctx.editMessageText("❌ خطا در دریافت اطلاعات فایل.", {
+        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), "list:0"),
+      });
+    }
+  });
+
+  // ── دانلود فایل ────────────────────────────────────────────
+  bot.callbackQuery(/^dl:(.+)$/, async (ctx) => {
+    const telegramId = ctx.from.id;
+    const fileId = ctx.match[1];
+    await ctx.answerCallbackQuery({ text: "در حال آماده‌سازی دانلود..." });
+
+    const user = await getUser(env.DB, telegramId);
+    if (!user || !ctx.chat) {
+      await ctx.reply("❌ مجوز ندارم. لطفاً دوباره /start رو بزن.");
+      return;
+    }
+
+    try {
+      const { accessToken } = await prepareDriveAccess(env, telegramId, user);
+      const meta = await getFileMeta(accessToken, fileId);
+      const sizeBytes = meta.size ? Number(meta.size) : 0;
+
+      if (sizeBytes > MAX_SEND_BYTES) {
+        const linkText = meta.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
+        await ctx.editMessageText(
+          `📦 این فایل بزرگ‌تر از ${MAX_SEND_BYTES / 1024 / 1024} مگابایته.\n\n🔗 برای دانلود از لینک زیر استفاده کن:\n${linkText}`,
+          { reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), `file:${fileId}`) }
+        );
+        return;
+      }
+
+      const bytes = await downloadFileBytes(accessToken, fileId);
+      await ctx.replyWithDocument(new InputFile(new Uint8Array(bytes), meta.name));
+    } catch (err) {
+      console.error("download error:", err);
+      await ctx.editMessageText("❌ دانلود ناموفق بود. دوباره امتحان کن.", {
+        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), `file:${fileId}`),
+      });
+    }
+  });
+
+  // ── حذف فایل (با تأیید) ────────────────────────────────────
+  bot.callbackQuery(/^del:(.+)$/, async (ctx) => {
+    const fileId = ctx.match[1];
+    await ctx.answerCallbackQuery();
+
+    const kb = new InlineKeyboard()
+      .text(pad("✅ بله، حذف کن"), `delok:${fileId}`)
+      .row()
+      .text(pad("🔙 انصراف"), `file:${fileId}`);
+
+    await ctx.editMessageText("❗️ مطمئنی می‌خوای این فایل رو برای همیشه حذف کنی؟", {
+      reply_markup: kb,
+    });
+  });
+
+  bot.callbackQuery(/^delok:(.+)$/, async (ctx) => {
+    const telegramId = ctx.from.id;
+    const fileId = ctx.match[1];
+    await ctx.answerCallbackQuery();
+
+    const user = await getUser(env.DB, telegramId);
+    if (!user) return;
+
+    try {
+      const { accessToken } = await prepareDriveAccess(env, telegramId, user);
+      await deleteFile(accessToken, fileId);
+      await ctx.editMessageText("🗑 فایل حذف شد.", {
+        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت به لیست"), "list:0"),
+      });
+    } catch (err) {
+      console.error("delete error:", err);
+      await ctx.editMessageText("❌ حذف ناموفق بود. دوباره امتحان کن.", {
+        reply_markup: new InlineKeyboard().text(pad("🔙 بازگشت"), `file:${fileId}`),
+      });
+    }
+  });
+
   return bot;
+}
+
+/**
+ * لیست فایل‌های کاربر رو می‌فرسته یا (اگه از callback بیاد) پیام موجود رو ادیت می‌کنه.
+ * isEdit=true یعنی از یه callback query میاد (باید editMessageText بشه، نه reply).
+ */
+async function sendFileList(ctx: any, env: Env, pageToken: string | undefined, isEdit = false) {
+  const telegramId = ctx.from.id;
+  const user = await getUser(env.DB, telegramId);
+  if (!user) {
+    await ctx.reply("قبلش باید با /start حساب گوگل‌درایوت رو وصل کنی.");
+    return;
+  }
+
+  const send = async (text: string, reply_markup: InlineKeyboard) => {
+    if (isEdit) {
+      await ctx.editMessageText(text, { reply_markup });
+    } else {
+      await ctx.reply(text, { reply_markup });
+    }
+  };
+
+  try {
+    const { accessToken, folderId } = await prepareDriveAccess(env, telegramId, user);
+    const { files, nextPageToken } = await listFilesInFolder(accessToken, folderId, pageToken);
+
+    if (files.length === 0 && !pageToken) {
+      await send("📭 هنوز فایلی در پوشه‌ی درایوت نیست.", new InlineKeyboard());
+      return;
+    }
+
+    const kb = new InlineKeyboard();
+    for (const f of files) {
+      kb.text(pad(`📄 ${fileNameLabel(f.name)}`), `file:${f.id}`).row();
+    }
+    if (nextPageToken) kb.text(pad("➡️ صفحه‌ی بعد"), `list:${nextPageToken}`).row();
+
+    await send("📋 فایل‌های تو در درایو:", kb);
+  } catch (err) {
+    console.error("list error:", err);
+    await send("❌ خطا در دریافت لیست فایل‌ها. دوباره امتحان کن.", new InlineKeyboard());
+  }
 }
 
 async function handleOAuthCallback(req: Request, env: Env): Promise<Response> {
